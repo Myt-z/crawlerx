@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: crawlerx
+    ports:
+      - "8800:8800"
+    environment:
+      - TZ=Asia/Shanghai
+      - LOG_LEVEL=INFO
+    volumes:
+      # 持久化数据目录 (容器重启不丢数据)
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    # 生产环境资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+        reservations:
+          memory: 512M
+          cpus: "0.5"

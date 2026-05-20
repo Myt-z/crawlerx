@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+.idea
+.git
+*.db
+data/db/*.db
+data/videos/*
+data/charts/*
+data/json/*
+data/csv/*
+data/demo/*
+logs/*
+.env
+*.md
+!使用说明.md
