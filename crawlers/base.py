@@ -11,6 +11,14 @@ import httpx
 import aiohttp
 from loguru import logger
 
+# 尝试导入 curl_cffi 用于 TLS 指纹伪装
+try:
+    import curl_cffi
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
+    curl_cffi = None
+
 import config
 
 
@@ -39,8 +47,11 @@ class BaseCrawler:
         # UA 池
         self._ua_list = self._load_user_agents()
 
+        # TLS 指纹伪装
+        self._use_curl_cffi = _HAS_CURL_CFFI and config.USE_CURL_CFFI
+
         # session 按需延迟创建（避免跨事件循环问题）
-        self._httpx_client: Optional[httpx.AsyncClient] = None
+        self._httpx_client = None
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
 
     # ---- UA 轮换 ----
@@ -124,20 +135,35 @@ class BaseCrawler:
         resp.raise_for_status()
         return resp.content if raw else resp.text
 
-    async def _get_httpx_client(self, proxy_url: str = None) -> httpx.AsyncClient:
-        """获取或创建 httpx 客户端。有代理时创建临时客户端。"""
+    async def _get_httpx_client(self, proxy_url: str = None):
+        """获取或创建 HTTP 客户端。优先使用 curl_cffi（TLS 指纹伪装），回退到 httpx。"""
         if proxy_url:
-            return httpx.AsyncClient(
-                proxy=proxy_url,
-                follow_redirects=True,
-                timeout=self.timeout,
-            )
+            return self._create_client(proxy_url)
         if self._httpx_client is None:
-            self._httpx_client = httpx.AsyncClient(
-                follow_redirects=True,
-                limits=httpx.Limits(max_connections=self.max_concurrent + 5),
-            )
+            self._httpx_client = self._create_client()
         return self._httpx_client
+
+    def _create_client(self, proxy_url: str = None):
+        """工厂方法：根据配置创建 httpx 或 curl_cffi 客户端。"""
+        if self._use_curl_cffi:
+            return self._create_curl_cffi_session(proxy_url)
+        return self._create_httpx_client(proxy_url)
+
+    def _create_curl_cffi_session(self, proxy_url: str = None):
+        """创建 curl_cffi AsyncSession，模拟 Chrome TLS 指纹。"""
+        kwargs = {"impersonate": config.IMPERSONATE_TARGET}
+        if proxy_url:
+            kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+        return curl_cffi.requests.AsyncSession(**kwargs)
+
+    def _create_httpx_client(self, proxy_url: str = None):
+        """创建 httpx AsyncClient（回退方案）。"""
+        kwargs = {"follow_redirects": True, "timeout": self.timeout}
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        else:
+            kwargs["limits"] = httpx.Limits(max_connections=self.max_concurrent + 5)
+        return httpx.AsyncClient(**kwargs)
 
     # ---- 批量并发抓取 ----
 
@@ -175,7 +201,12 @@ class BaseCrawler:
         existing_size = dest.stat().st_size if dest.exists() else 0
         headers = self._build_headers()
         if existing_size > 0:
-            headers["Range"] = f"bytes={existing_size}-"
+            if not self._use_curl_cffi:
+                headers["Range"] = f"bytes={existing_size}-"
+            else:
+                # curl_cffi 对 Range 请求支持有限，删除已有文件重新下载
+                dest.unlink(missing_ok=True)
+                existing_size = 0
 
         try:
             client = await self._get_httpx_client()
@@ -200,10 +231,16 @@ class BaseCrawler:
 
     async def close(self):
         if self._httpx_client:
-            await self._httpx_client.aclose()
+            try:
+                await self._httpx_client.aclose()
+            except Exception:
+                pass
             self._httpx_client = None
         if self._aiohttp_session:
-            await self._aiohttp_session.close()
+            try:
+                await self._aiohttp_session.close()
+            except Exception:
+                pass
             self._aiohttp_session = None
 
     async def __aenter__(self):

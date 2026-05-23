@@ -23,6 +23,14 @@ MAX_PAGES = 0                     # 最大翻页数（0=不限制）
 USER_AGENT_ROTATION = True        # 是否启用 UA 轮换
 
 # ============================================================
+# TLS 指纹反检测 (curl_cffi)
+# ============================================================
+# 模拟目标浏览器。curl_cffi 可用时生效。
+# 可选值: "chrome124", "chrome123", "chrome120", "firefox125", "safari17_0", "edge124"
+IMPERSONATE_TARGET = "chrome124"
+USE_CURL_CFFI = True              # 是否优先使用 curl_cffi（False 则只用 httpx）
+
+# ============================================================
 # HTTP 请求头
 # ============================================================
 DEFAULT_HEADERS = {
@@ -57,6 +65,20 @@ JSON_DIR = DATA_DIR / "json"
 CSV_DIR = DATA_DIR / "csv"
 JSON_DIR.mkdir(exist_ok=True)
 CSV_DIR.mkdir(exist_ok=True)
+
+# ============================================================
+# 断点续爬
+# ============================================================
+CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+CHECKPOINT_INTERVAL = 3            # 每隔 N 页保存一次检查点
+CHECKPOINT_ENABLED = True          # 是否启用断点续爬
+
+# ============================================================
+# 自适应元素重定位
+# ============================================================
+ADAPTIVE_FINGERPRINT_DIR = DATA_DIR / "fingerprints"
+ADAPTIVE_ENABLED = True            # 是否启用自适应重定位
+ADAPTIVE_SIMILARITY_THRESHOLD = 0.6  # 文本相似度阈值 (0-1)
 
 # ============================================================
 # 日志

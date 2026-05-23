@@ -81,21 +81,27 @@ class VideoCrawler(BaseCrawler):
 
         # Step 2: 下载 ts 分片
         tmp_dir = self.video_dir / f".tmp_{filename}"
+        # 清理上次中断可能遗留的临时目录
+        if tmp_dir.exists():
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         tmp_dir.mkdir(exist_ok=True)
 
         success = await self._download_segments(segments, m3u8_url, tmp_dir, headers)
         if not success:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             return None
 
         # Step 3: ffmpeg 合并
         logger.info(f"[ffmpeg] 合并 ts 分片 → {out_path}")
-        merged = await self._merge_ts(tmp_dir, out_path)
-
-        # Step 4: 清理
-        import shutil
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-        return out_path if merged else None
+        try:
+            merged = await self._merge_ts(tmp_dir, out_path)
+            return out_path if merged else None
+        finally:
+            # Step 4: 清理临时目录（无论成功失败都清理）
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     async def _parse_m3u8(self, url: str, extra_headers: dict = None) -> Optional[dict]:
         """下载并解析 m3u8 播放列表"""
@@ -134,6 +140,19 @@ class VideoCrawler(BaseCrawler):
         self, segments: list, base_url: str, tmp_dir: Path, extra_headers: dict = None
     ) -> bool:
         """并发下载所有 ts 分片到临时目录"""
+        # 去重：按 URI 消除重复分片
+        seen_uris = set()
+        unique_segments = []
+        for seg in segments:
+            uri = seg.get("uri", "")
+            resolved = self._resolve_url(base_url, uri)
+            if resolved not in seen_uris:
+                seen_uris.add(resolved)
+                unique_segments.append(seg)
+        if len(unique_segments) < len(segments):
+            logger.info(f"[ts] 去重: {len(segments)} -> {len(unique_segments)} 个分片")
+        segments = unique_segments
+
         sem = asyncio.Semaphore(config.VIDEO_MAX_WORKERS)
         failed = []
 
@@ -142,6 +161,10 @@ class VideoCrawler(BaseCrawler):
                 uri = seg.get("uri", "")
                 seg_url = self._resolve_url(base_url, uri)
                 seg_path = tmp_dir / f"{idx:06d}.ts"
+
+                # 断点续传：跳过已下载的分片
+                if seg_path.exists() and seg_path.stat().st_size > 0:
+                    return
 
                 for retry in range(3):
                     try:

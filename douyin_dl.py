@@ -19,6 +19,14 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+# 尝试导入 curl_cffi 用于 TLS 指纹伪装
+try:
+    import curl_cffi as _curl_cffi
+    _HAS_CURL_CFFI_DOUYIN = True
+except ImportError:
+    _HAS_CURL_CFFI_DOUYIN = False
+    _curl_cffi = None
+
 # 项目根目录
 sys.path.insert(0, str(Path(__file__).parent))
 import config
@@ -213,7 +221,14 @@ class DouyinDownloader:
 
         logger.info(f"开始下载: {out_path.name}")
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+            if _HAS_CURL_CFFI_DOUYIN and getattr(config, 'USE_CURL_CFFI', True):
+                client = _curl_cffi.requests.AsyncSession(
+                    impersonate=getattr(config, 'IMPERSONATE_TARGET', 'chrome124'),
+                    timeout=120,
+                )
+            else:
+                client = httpx.AsyncClient(follow_redirects=True, timeout=120)
+            async with client:
                 async with client.stream("GET", url, headers=headers) as resp:
                     if resp.status_code not in (200, 206):
                         logger.error(f"下载失败 HTTP {resp.status_code}")

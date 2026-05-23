@@ -1,10 +1,16 @@
 """
 HTML 解析器 —— CSS 选择器 / XPath 提取数据
 """
+import hashlib
+import json
+from pathlib import Path
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup
+from loguru import logger
 from parsel import Selector
+
+import config
 
 
 class HTMLParser:
@@ -76,7 +82,7 @@ class HTMLParser:
 
     # ---- 规则解析（最常用） ----
 
-    def parse_list(self, html: str, rules: dict) -> list[dict]:
+    def parse_list(self, html: str, rules: dict, url: str = None) -> list[dict]:
         """
         按 rules 字典批量提取结构化数据。
 
@@ -88,23 +94,45 @@ class HTMLParser:
             "tags":    {"selector": "span.tag", "attr": "text", "multiple": True},
         }
 
+        url 参数用于自适应重定位的指纹存储（可选）。
+
         返回 list[dict]，每个 dict 对应一个容器元素。
         """
-        soup = BeautifulSoup(html, "lxml")
+        if url:
+            self.url = url
+
         data = []
 
         # 自动检测容器：找到所有规则中第一个 selector 的共同父级
         container_selector = self._find_container(rules)
 
+        # 尝试从指纹库加载已知的工作选择器
+        if not container_selector and config.ADAPTIVE_ENABLED:
+            container_selector = self._load_fingerprint(rules)
+
         if container_selector:
             # 有明确的容器
             sel = Selector(text=html)
             containers = sel.css(container_selector)
+
+            # ---- 自适应重定位：容器选择器返回空时尝试回退 ----
+            if not containers and config.ADAPTIVE_ENABLED:
+                fallback = self._find_fallback_container(html, rules, container_selector)
+                if fallback:
+                    logger.info(f"[自适应] 容器回退: {container_selector} -> {fallback}")
+                    containers = sel.css(fallback)
+                    if containers:
+                        container_selector = fallback
+
             for item_sel in containers:
                 row = {}
                 for field, rule in rules.items():
                     row[field] = self._apply_rule(item_sel, rule)
                 data.append(row)
+
+            # 保存成功的选择器指纹
+            if data and config.ADAPTIVE_ENABLED and self.url:
+                self._save_fingerprint(rules, container_selector)
         else:
             # 无容器，按每条规则单独提取后 zip
             sel = Selector(text=html)
@@ -166,6 +194,81 @@ class HTMLParser:
                 break
 
         return " ".join(common) if common else None
+
+    # ---- 自适应重定位 ----
+
+    def _find_fallback_container(
+        self, html: str, rules: dict, original_selector: str
+    ) -> Optional[str]:
+        """当原始容器选择器返回空时，尝试前缀回退寻找替代容器。"""
+        tokens = original_selector.split()
+        if len(tokens) < 2:
+            return None
+
+        sel = Selector(text=html)
+        # 逐级缩短选择器
+        for i in range(len(tokens) - 1, 0, -1):
+            candidate = " ".join(tokens[:i])
+            containers = sel.css(candidate)
+            if containers:
+                # 验证：短容器内能否匹配到目标元素
+                first_rule = list(rules.values())[0]
+                target_sel = first_rule.get("selector", "")
+                if target_sel:
+                    for container in containers[:3]:
+                        if container.css(target_sel):
+                            return candidate
+        return None
+
+    def _get_fingerprint_path(self) -> Optional[Path]:
+        """根据 URL 域名获取指纹文件路径。"""
+        if not self.url:
+            return None
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(self.url).netloc or "unknown"
+            safe_domain = hashlib.md5(domain.encode()).hexdigest()[:12]
+            config.ADAPTIVE_FINGERPRINT_DIR.mkdir(parents=True, exist_ok=True)
+            return config.ADAPTIVE_FINGERPRINT_DIR / f"{safe_domain}.json"
+        except Exception:
+            return None
+
+    def _save_fingerprint(self, rules: dict, effective_selector: str):
+        """保存成功的选择器指纹，供以后回退使用。"""
+        path = self._get_fingerprint_path()
+        if not path:
+            return
+        try:
+            fingerprints = {}
+            if path.exists():
+                fingerprints = json.loads(path.read_text(encoding="utf-8"))
+            rule_key = hashlib.md5(
+                json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()[:12]
+            fingerprints[rule_key] = {"container_selector": effective_selector}
+            path.write_text(
+                json.dumps(fingerprints, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _load_fingerprint(self, rules: dict) -> Optional[str]:
+        """加载之前成功的选择器指纹。"""
+        path = self._get_fingerprint_path()
+        if not path or not path.exists():
+            return None
+        try:
+            fingerprints = json.loads(path.read_text(encoding="utf-8"))
+            rule_key = hashlib.md5(
+                json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()[:12]
+            entry = fingerprints.get(rule_key)
+            if entry:
+                return entry.get("container_selector")
+        except Exception:
+            pass
+        return None
 
     # ---- 翻页辅助 ----
 
